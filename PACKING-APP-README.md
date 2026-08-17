@@ -52,9 +52,13 @@ New-trip questions beyond the basics — accommodation type, international or no
 
 ## Pasting in an old list
 
-Add tab → **Paste in a whole list instead**. Works with Google Tasks exports and similar: headings (with or without a colon) become groups, quantities written as "x3", "X2" or "7 bottles" are picked up automatically including when glued onto the item name, and anything in brackets becomes a note rather than part of the name.
+Add tab → **Paste in a whole list instead**. Works with Google Tasks exports and similar: headings (with or without a colon, including `**bold:**` and `*italic:*` markdown styles, and checkbox-prefixed ones like `[ ] BUGGIES:`) become groups, quantities written as "x3", "X2" or "7 bottles" are picked up automatically including when glued onto the item name, and anything in brackets becomes a note rather than part of the name.
 
-After reading the list, map each **group** to a current room and bag — not each item individually. Skip any group you don't want. Old bag names like "blue bag" come in fine; rename them properly afterwards from Rooms and bags, which will sweep every item that used that name.
+**The first line is checked for a trip title** before anything else — something like "Efteling christmas, 4 days, driving" is read for name, month (including "christmas" → December, "easter" → April, and similar), day count, transport, and whether it looks international, rather than being imported as an item. A teal box shows what it understood and lets you create a proper new trip from it, or turn that off to import into whichever trip is already active instead.
+
+After that, **map each group to a current room and bag** — not each item individually. The app makes its own best guess first: a direct name match, or "Upstairs"/"Downstairs" mapped against which of your rooms are upstairs (bedrooms, our bathroom, landing, utility cupboard) versus everything else. Where it genuinely can't tell — "Meds", "Purple bag", anything that doesn't match a known room or bag — it says so honestly with an amber "needs a choice" flag rather than silently defaulting to whatever's first in the list. Those groups float to the top so you see them before the ones it got right. The import button stays disabled until every included group has both a room and a bag chosen, so nothing can land in the wrong place by accident.
+
+Old bag names like "blue bag" come in fine under whatever heading the old list used; rename them properly afterwards from Rooms and bags, which will sweep every item that used that name.
 
 Strip real names out before pasting. Use S, F, Mum, Dad.
 
