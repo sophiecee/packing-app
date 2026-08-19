@@ -854,6 +854,7 @@ function App() {
   const [editing, setEditing] = useState(null);
   const [assigning, setAssigning] = useState(null);
   const [archivedLibraryItems, setArchivedLibraryItems] = useState([]); // normalised names, hidden from the library only
+  const [libraryOpenSearch, setLibraryOpenSearch] = useState("");
   const recentEdits = useRef(new Map());
 
   /* --- saved preferences --- */
@@ -1327,10 +1328,11 @@ function App() {
         onSave={(p) => { patch("items", editing.id, p); setEditing(null); }}
         onDelete={() => { drop("items", editing.id); setEditing(null); }} />
 
-      <AddItemSheet open={sheet === "add"} rooms={rooms} bags={bags} packers={packers}
+      <AddItemSheet open={sheet === "add"} rooms={rooms} bags={bags} packers={packers} items={items}
         onPasteList={() => setSheet("import")}
         onAddRoom={(name) => savePlaces({ rooms: [...rooms, name] })}
         onAddBag={(name) => savePlaces({ bags: [...bags, name] })}
+        onGoToLibrary={(name) => { setLibraryOpenSearch(name); setSheet("library"); }}
         onClose={() => setSheet(null)} onAdd={(r) => { addItems([r]); setSheet(null); }} />
 
       <AssignSheet group={assigning} packers={packers} onClose={() => setAssigning(null)}
@@ -1379,6 +1381,7 @@ function App() {
         }} />
 
       <LibrarySheet open={sheet === "library"} items={items} trips={trips} activeTripId={activeTripId}
+        initialSearch={libraryOpenSearch}
         archivedLibraryItems={archivedLibraryItems} onArchive={archiveLibraryItem} onUnarchive={unarchiveLibraryItem}
         rooms={rooms} bags={bags} packers={packers}
         onClose={() => setSheet(null)}
@@ -1943,7 +1946,7 @@ function EditItemSheet({ item, rooms, bags, packers, onAddRoom, onAddBag, onClos
   );
 }
 
-function AddItemSheet({ open, rooms, bags, packers, onAddRoom, onAddBag, onClose, onAdd, onPasteList }) {
+function AddItemSheet({ open, rooms, bags, packers, items, onAddRoom, onAddBag, onClose, onAdd, onPasteList, onGoToLibrary }) {
   const blank = { name: "", room_source: rooms[0], assigned_bag: bags[0], quantity: 1, notes_or_special_instructions: "", packer: "Either of us", is_prescription: false, last_minute: false, is_flagged: false, flag_note: "" };
   const [d, setD] = useState(blank);
   const [keepOpen, setKeepOpen] = useState(true);
@@ -1956,6 +1959,28 @@ function AddItemSheet({ open, rooms, bags, packers, onAddRoom, onAddBag, onClose
     if (keepOpen) setD({ ...blank, room_source: d.room_source, assigned_bag: d.assigned_bag, packer: d.packer });
     else onClose();
   };
+
+  /* Live nudge as they type: is something close to this already in the
+     library? Same normalising as the library's own dedup, plus a looser
+     "starts with" check so "wipe" still surfaces "Wipes" while typing. */
+  const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const libraryMatch = useMemo(() => {
+    const q = norm(d.name);
+    if (q.length < 3) return null;
+    const seen = new Map();
+    (items || []).forEach((i) => {
+      const key = norm(i.name);
+      if (!key) return;
+      if (key === q || key.startsWith(q) || q.startsWith(key)) {
+        if (!seen.has(key)) seen.set(key, { name: i.name, count: 0, key });
+        seen.get(key).count++;
+      }
+    });
+    const matches = [...seen.values()];
+    // exact match first, otherwise the most-used near-match
+    return matches.find((m) => m.key === q) || matches.sort((a, b) => b.count - a.count)[0] || null;
+  }, [d.name, items]);
+
   return (
     <Sheet open={open} title="Add an item" onClose={onClose}>
       {onPasteList && (
@@ -1964,6 +1989,20 @@ function AddItemSheet({ open, rooms, bags, packers, onAddRoom, onAddBag, onClose
         </button>
       )}
       <Field label="Item"><input autoFocus className={inputCls} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Ear defenders" /></Field>
+
+      {libraryMatch && (
+        <button
+          onClick={() => onGoToLibrary(libraryMatch.name)}
+          className="mb-4 -mt-2 flex w-full items-start gap-2 rounded-lg border-2 border-teal-300 bg-teal-50 p-3 text-left"
+        >
+          <BookOpen size={16} className="mt-0.5 shrink-0 text-teal-700" />
+          <span className="text-sm text-teal-900">
+            Want to add "<span className="font-bold underline">{libraryMatch.name}</span>" from the library?
+            {libraryMatch.count > 1 && <span className="text-teal-700"> Used on {libraryMatch.count} trip{libraryMatch.count === 1 ? "" : "s"} already.</span>}
+          </span>
+        </button>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="From which room">
           <PickOrAdd value={d.room_source} options={localRooms} placeholder="New room name"
@@ -2403,7 +2442,7 @@ function NewTripSheet({ open, onClose, trips, items, tasks, rooms, bags, onCreat
    matching row across every trip, which is what makes it possible to empty a
    room like "Medicine Cabinet" and then delete it. */
 function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, packers,
-                        archivedLibraryItems, onArchive, onUnarchive,
+                        archivedLibraryItems, onArchive, onUnarchive, initialSearch,
                         onAddToTrip, onEditEverywhere, onDeleteEverywhere }) {
   const [view, setView] = useState("library"); // library | duplicates
   const [search, setSearch] = useState("");
@@ -2416,7 +2455,13 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   const archivedSet = useMemo(() => new Set(archivedLibraryItems || []), [archivedLibraryItems]);
   const [collapsedGroups, setCollapsedGroups] = useState({});
 
-  useEffect(() => { if (open) { setSearch(""); setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); } }, [open]);
+  useEffect(() => {
+    if (open) {
+      setSearch(initialSearch || "");
+      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null);
+      setCollapsedGroups({}); // a deep-linked search should show its match, not a collapsed group
+    }
+  }, [open, initialSearch]);
 
   const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
