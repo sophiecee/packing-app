@@ -398,6 +398,9 @@ function makeClient(url, key) {
     insert: (table, rows) => go(table, { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(rows) }),
     update: (table, id, patch) => go(`${table}?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
     remove: (table, id) => go(`${table}?id=eq.${id}`, { method: "DELETE" }),
+    /* Insert-or-update in one call, for the single shared settings row —
+       simpler than checking existence first from a phone on a flaky connection. */
+    upsert: (table, row) => go(table, { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(row) }),
   };
 }
 
@@ -438,16 +441,28 @@ create table photos (
   bag text, caption text, data_url text
 );
 
+/* One shared row holding rooms, bags and packers — a single source of truth
+   both phones read and write, instead of each phone keeping its own local
+   copy (which is how they used to drift apart). */
+create table app_settings (
+  id text primary key default 'shared',
+  rooms jsonb, bags jsonb, packers jsonb,
+  updated_at timestamptz default now()
+);
+
 alter table trips enable row level security;
 alter table items enable row level security;
 alter table tasks enable row level security;
 alter table contacts enable row level security;
 alter table photos enable row level security;
+alter table app_settings enable row level security;
 create policy "open" on trips for all using (true) with check (true);
 create policy "open" on items for all using (true) with check (true);
 create policy "open" on tasks for all using (true) with check (true);
 create policy "open" on contacts for all using (true) with check (true);
-create policy "open" on photos for all using (true) with check (true);`;
+create policy "open" on photos for all using (true) with check (true);
+create policy "open" on app_settings for all using (true) with check (true);
+grant select, insert, update, delete on public.app_settings to anon;`;
 
 /* ------------------------------- AI -------------------------------- */
 
@@ -860,26 +875,45 @@ function App() {
   /* --- saved preferences --- */
   useEffect(() => {
     (async () => {
-      const s = await store.get("supabase-settings");
-      if (s?.url && s?.key) { setSettings(s); connect(s.url, s.key); }
       const p = await store.get("place-names");
       if (p) {
+        // Local fallback for demo mode, and to seed the shared row the very
+        // first time this phone connects (see connect(), which only seeds
+        // from local values if Supabase's app_settings row doesn't exist yet).
         if (p.rooms?.length) setRooms(p.rooms);
         if (p.bags?.length) setBags(p.bags);
         if (p.packers?.length) setPackers(p.packers);
-        if (p.me) setMe(p.me);
       }
+      const myName = await store.get("my-name");
+      if (myName) setMe(myName);
+      else if (p?.me) setMe(p.me); // migrate from the old combined storage key
+
+      const s = await store.get("supabase-settings");
+      if (s?.url && s?.key) { setSettings(s); connect(s.url, s.key, { rooms: p?.rooms, bags: p?.bags, packers: p?.packers }); }
+
       const arch = await store.get("archived-library-items");
       if (Array.isArray(arch)) setArchivedLibraryItems(arch);
     })();
   }, []);
 
   const savePlaces = async (next) => {
+    const merged = { rooms, bags, packers, ...next };
     if (next.rooms) setRooms(next.rooms);
     if (next.bags) setBags(next.bags);
     if (next.packers) setPackers(next.packers);
-    if (next.me) setMe(next.me);
-    await store.set("place-names", { rooms, bags, packers, me, ...next });
+    if (next.me) setMe(next.me); // "me" stays a personal, per-device preference
+    if (client) {
+      try {
+        await client.upsert("app_settings", { id: "shared", rooms: merged.rooms, bags: merged.bags, packers: merged.packers });
+      } catch {
+        enqueue({ kind: "upsert", table: "app_settings", row: { id: "shared", rooms: merged.rooms, bags: merged.bags, packers: merged.packers } });
+        drainQueue();
+      }
+    } else {
+      // demo mode, no Supabase connected — keep the old local fallback
+      await store.set("place-names", merged);
+    }
+    if (next.me) await store.set("my-name", next.me);
   };
 
   const archiveLibraryItem = async (key) => {
@@ -893,17 +927,38 @@ function App() {
     await store.set("archived-library-items", next);
   };
 
-  const connect = useCallback(async (url, key) => {
+  const connect = useCallback(async (url, key, seed) => {
     setBusy("connect");
     try {
       const c = makeClient(url, key);
-      const [t, i, k, ct, ph] = await Promise.all([
+      const [t, i, k, ct, ph, appSettings] = await Promise.all([
         c.all("trips"), c.all("items"), c.all("tasks"), c.all("contacts"), c.all("photos"),
+        c.all("app_settings").catch(() => []), // table may not exist yet on an older setup
       ]);
       setClient(c);
       setTrips((t || []).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")));
       setItems(i || []); setTasks(k || []); setContacts(ct || []); setPhotos(ph || []);
       setActiveTripId((t || [])[0]?.id ?? null);
+
+      /* Rooms/bags/packers used to live only in each phone's own storage,
+         which is how two phones ended up with different lists. Now there's
+         one shared row in Supabase; if it doesn't exist yet, seed it from
+         whatever was just loaded from this phone's local storage (or the
+         defaults) so nothing's lost on the very first migration. */
+      const existing = (appSettings || [])[0];
+      if (existing) {
+        if (existing.rooms?.length) setRooms(existing.rooms);
+        if (existing.bags?.length) setBags(existing.bags);
+        if (existing.packers?.length) setPackers(existing.packers);
+      } else {
+        const seedRooms = seed?.rooms?.length ? seed.rooms : DEFAULT_ROOMS;
+        const seedBags = seed?.bags?.length ? seed.bags : DEFAULT_BAGS;
+        const seedPackers = seed?.packers?.length ? seed.packers : DEFAULT_PACKERS;
+        try {
+          await c.upsert("app_settings", { id: "shared", rooms: seedRooms, bags: seedBags, packers: seedPackers });
+        } catch { /* app_settings table not created yet; local values still work for this session */ }
+      }
+
       setStatus("live"); setStatusMsg("");
       await store.set("supabase-settings", { url, key });
     } catch (e) {
@@ -924,8 +979,9 @@ function App() {
     const tick = setInterval(async () => {
       if (readQueue().length) return; // don't pull server state over unsent local changes
       try {
-        const [i, k, ct, t, ph] = await Promise.all([
+        const [i, k, ct, t, ph, appSettings] = await Promise.all([
           client.all("items"), client.all("tasks"), client.all("contacts"), client.all("trips"), client.all("photos"),
+          client.all("app_settings").catch(() => null),
         ]);
         const now = Date.now();
         const keepMine = (fresh, prev) => {
@@ -938,6 +994,14 @@ function App() {
         setContacts((p) => keepMine(ct, p));
         setTrips((p) => keepMine(t, p).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")));
         setPhotos(ph || []);
+        /* Pick up rooms/bags/packers added on the other phone — this is
+           exactly the gap that used to leave the two devices out of step. */
+        const shared = (appSettings || [])[0];
+        if (shared) {
+          if (shared.rooms?.length) setRooms(shared.rooms);
+          if (shared.bags?.length) setBags(shared.bags);
+          if (shared.packers?.length) setPackers(shared.packers);
+        }
       } catch { /* next tick will catch up */ }
     }, 4000);
     return () => clearInterval(tick);
@@ -963,6 +1027,7 @@ function App() {
     if (op.kind === "update") await client.update(op.table, op.id, op.patch);
     else if (op.kind === "insert") await client.insert(op.table, op.rows);
     else if (op.kind === "delete") await client.remove(op.table, op.id);
+    else if (op.kind === "upsert") await client.upsert(op.table, op.row);
   };
 
   const drainQueue = useCallback(async () => {
