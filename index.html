@@ -113,6 +113,11 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
    things to be predictable. Single file. Demo mode or Supabase sync.
 ================================================================== */
 
+/* Bumped whenever the file changes, and shown next to "Synced" in the header
+   — so "is my phone actually running the new version?" is answerable at a
+   glance instead of by guesswork. */
+const BUILD = "b12";
+
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
   "Sensory / Calming Corner", "Kids Bedroom", "Our Bedroom",
@@ -409,6 +414,7 @@ const SQL = `create table trips (
   transport text, notes text, review text,
   accommodation text, international boolean default false,
   nights_en_route int default 0,
+  not_this_trip jsonb,
   created_at timestamptz default now()
 );
 
@@ -1165,12 +1171,31 @@ function App() {
     return full;
   };
 
-  const addItems = async (rows, tripId = activeTripId) =>
-    add("items", rows.map((r) => ({
-      trip_id: tripId, is_packed: false, quantity: 1, notes_or_special_instructions: "",
-      packer: "Either of us", is_flagged: false, flag_note: "", is_prescription: false,
-      last_minute: false, room_source: rooms[0], assigned_bag: bags[0], ...r,
-    })));
+  const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const addItems = async (rows, tripId = activeTripId) => {
+    /* An item can appear on a trip only once by name — same rule the library
+       and "did you mean" prompt already assume. Case and punctuation don't
+       count as different: "Wipes" and "wipes" are the same item. */
+    const already = new Set(items.filter((i) => i.trip_id === tripId).map((i) => norm(i.name)));
+    const seenThisBatch = new Set();
+    const toAdd = [];
+    const skipped = [];
+    rows.forEach((r) => {
+      const key = norm(r.name);
+      if (!key || already.has(key) || seenThisBatch.has(key)) { if (key) skipped.push(r.name); return; }
+      seenThisBatch.add(key);
+      toAdd.push(r);
+    });
+    if (toAdd.length) {
+      await add("items", toAdd.map((r) => ({
+        trip_id: tripId, is_packed: false, quantity: 1, notes_or_special_instructions: "",
+        packer: "Either of us", is_flagged: false, flag_note: "", is_prescription: false,
+        last_minute: false, room_source: rooms[0], assigned_bag: bags[0], ...r,
+      })));
+    }
+    return { added: toAdd.length, skipped };
+  };
 
   const addTrip = async (t) => {
     const trip = { id: uid(), created_at: new Date().toISOString(), review: null, ...t };
@@ -1245,10 +1270,21 @@ function App() {
     const keyOf = (i) => (view === "gather" ? i.room_source || "Unsorted" : i.assigned_bag || "No bag yet");
     const map = new Map();
     visible.forEach((i) => { const k = keyOf(i); if (!map.has(k)) map.set(k, []); map.get(k).push(i); });
-    return [...map.entries()].sort((a, b) => {
-      const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
-      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a[0].localeCompare(b[0]);
-    });
+    return [...map.entries()]
+      .sort((a, b) => {
+        const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
+        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a[0].localeCompare(b[0]);
+      })
+      /* Packed items sink to the bottom of their group, so what's left to
+         gather stays at the top. In the "In bags" view everything is packed,
+         so ordering there stays alphabetical. */
+      .map(([label, list]) => [
+        label,
+        [...list].sort((x, y) => {
+          if (view !== "manifest" && !!x.is_packed !== !!y.is_packed) return x.is_packed ? 1 : -1;
+          return (x.name || "").localeCompare(y.name || "");
+        }),
+      ]);
   }, [visible, view, rooms, bags]);
 
   const jobCounts = JOB_KINDS.map((k) => {
@@ -1278,7 +1314,7 @@ function App() {
           <div className="mt-3"><Meter done={packedCount} total={tripItems.length} /></div>
           <div className="mt-2 flex items-center gap-2 text-xs font-semibold">
             {status === "live"
-              ? <><Wifi size={13} className="text-teal-700" /><span className="text-teal-700">Synced</span></>
+              ? <><Wifi size={13} className="text-teal-700" /><span className="text-teal-700">Synced</span><span className="text-slate-300">·{BUILD}</span></>
               : <><WifiOff size={13} className="text-amber-600" /><span className="text-amber-700">Demo mode — this device only</span></>}
             {status === "live" && pendingCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-amber-800">
@@ -1461,7 +1497,7 @@ function App() {
         onAddRoom={(name) => savePlaces({ rooms: [...rooms, name] })}
         onAddBag={(name) => savePlaces({ bags: [...bags, name] })}
         onGoToLibrary={(name) => { setLibraryOpenSearch(name); setSheet("library"); }}
-        onClose={() => setSheet(null)} onAdd={(r) => { addItems([r]); setSheet(null); }} />
+        onClose={() => setSheet(null)} onAdd={(r) => addItems([r])} />
 
       <AssignSheet group={assigning} packers={packers} onClose={() => setAssigning(null)}
         onPick={(p) => { bulkPacker(assigning.list, p); setAssigning(null); }} />
@@ -1520,7 +1556,15 @@ function App() {
 
       <LibrarySheet open={sheet === "library"} items={items} trips={trips} activeTripId={activeTripId}
         collapsedGroups={libraryCollapsed} setCollapsedGroups={setLibraryCollapsedPersisted}
-        initialSearch={libraryOpenSearch}
+        initialSearch={libraryOpenSearch} onSearchConsumed={() => setLibraryOpenSearch("")}
+        trip={activeTrip}
+        notThisTrip={(() => { try { return activeTrip?.not_this_trip || []; } catch { return []; } })()}
+        onToggleNotThisTrip={(key) => {
+          if (!activeTrip) return;
+          const current = activeTrip.not_this_trip || [];
+          const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
+          patch("trips", activeTrip.id, { not_this_trip: next });
+        }}
         archivedLibraryItems={archivedLibraryItems} onArchive={archiveLibraryItem} onUnarchive={unarchiveLibraryItem}
         rooms={rooms} bags={bags} packers={packers}
         onClose={() => setSheet(null)}
@@ -1659,7 +1703,14 @@ function JobsScreen({ trip, tasks, packers, counts, history, onToggle, onAdd, on
 
   if (!trip) return <div className="p-4"><Empty title="No trip yet." body="Start a trip and the job lists live here." /></div>;
 
-  const list = tasks.filter((t) => t.kind === kind).sort((a, b) => (a.position || 0) - (b.position || 0));
+  /* Done jobs sink to the bottom so the list stays about what's left to do,
+     while keeping their relative order within each half. */
+  const list = tasks
+    .filter((t) => t.kind === kind)
+    .sort((a, b) => {
+      if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+      return (a.position || 0) - (b.position || 0);
+    });
   const meta = JOB_KINDS.find((k) => k.id === kind);
   const selectedIds = list.filter((t) => sel[t.id]).map((t) => t.id);
 
@@ -2235,10 +2286,16 @@ function AddItemSheet({ open, rooms, bags, packers, items, onAddRoom, onAddBag, 
   const [keepOpen, setKeepOpen] = useState(true);
   const [localRooms, setLocalRooms] = useState(rooms);
   const [localBags, setLocalBags] = useState(bags);
-  useEffect(() => { if (open) { setD(blank); setLocalRooms(rooms); setLocalBags(bags); } }, [open]);
-  const submit = () => {
+  useEffect(() => { if (open) { setD(blank); setLocalRooms(rooms); setLocalBags(bags); setDupeWarning(""); } }, [open]);
+  const [dupeWarning, setDupeWarning] = useState("");
+  const submit = async () => {
     if (!d.name.trim()) return;
-    onAdd(d);
+    setDupeWarning("");
+    const result = await onAdd(d);
+    if (result?.skipped?.length) {
+      setDupeWarning(`"${result.skipped[0]}" is already on this trip — not added again. Open it from the list if you need more of it.`);
+      return; // let them see the message and decide, rather than closing under them
+    }
     if (keepOpen) setD({ ...blank, room_source: d.room_source, assigned_bag: d.assigned_bag, packer: d.packer });
     else onClose();
   };
@@ -2330,6 +2387,9 @@ function AddItemSheet({ open, rooms, bags, packers, items, onAddRoom, onAddBag, 
         <input type="checkbox" checked={keepOpen} onChange={(e) => setKeepOpen(e.target.checked)} className="h-5 w-5" />
         Keep this open so I can add several
       </label>
+      {dupeWarning && (
+        <p className="mb-3 rounded-xl border-2 border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">{dupeWarning}</p>
+      )}
       <button disabled={!d.name.trim()} onClick={submit} className={`${btn} w-full bg-slate-900 py-4 text-white disabled:opacity-40`}>Add to list</button>
     </Sheet>
   );
@@ -2747,7 +2807,8 @@ function NewTripSheet({ open, onClose, trips, items, tasks, rooms, bags, onCreat
    matching row across every trip, which is what makes it possible to empty a
    room like "Medicine Cabinet" and then delete it. */
 function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, packers,
-                        archivedLibraryItems, onArchive, onUnarchive, initialSearch,
+                        archivedLibraryItems, onArchive, onUnarchive, initialSearch, onSearchConsumed,
+                        trip, notThisTrip, onToggleNotThisTrip,
                         collapsedGroups, setCollapsedGroups,
                         onAddToTrip, onEditEverywhere, onDeleteEverywhere }) {
   const [view, setView] = useState("library"); // library | duplicates
@@ -2763,10 +2824,15 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   useEffect(() => {
     if (open) {
       setSearch(initialSearch || "");
-      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null);
+      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); setLibDupeWarning("");
       /* Only force groups open when arriving from a "did you mean X" link —
          otherwise leave the person's own collapsed/expanded choices alone. */
-      if (initialSearch) setCollapsedGroups({});
+      if (initialSearch) {
+        setCollapsedGroups({});
+        /* Consume it, so the next plain visit to the library isn't still
+           filtered to whatever was searched for once, days ago. */
+        if (onSearchConsumed) onSearchConsumed();
+      }
     }
   }, [open, initialSearch]);
 
@@ -2842,9 +2908,22 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   }, [library, search, archivedSet, showArchived]);
   const archivedCount = library.filter((e) => archivedSet.has(e.key)).length;
 
+  /* Items already on this trip sink below the ones you could still add, and
+     both halves run alphabetically — which also makes near-duplicates sit
+     next to each other and easier to spot. */
+  const notThisTripSet = useMemo(() => new Set(notThisTrip || []), [notThisTrip]);
+
+  const byNotOnTripThenName = (a, b) => {
+    /* Still-addable items first, then ones already packed or ruled out. */
+    const aDone = onThisTrip.has(a.key) || notThisTripSet.has(a.key);
+    const bDone = onThisTrip.has(b.key) || notThisTripSet.has(b.key);
+    if (aDone !== bDone) return aDone ? 1 : -1;
+    return (a.name || "").localeCompare(b.name || "");
+  };
+
   const grouped = useMemo(() => {
     if (groupBy === "name") {
-      return [["All items, A–Z", [...filtered].sort((a, b) => a.name.localeCompare(b.name))]];
+      return [["All items, A–Z", [...filtered].sort(byNotOnTripThenName)]];
     }
     const field = groupBy === "room" ? "room_source" : "assigned_bag";
     const order = groupBy === "room" ? rooms : bags;
@@ -2859,20 +2938,37 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
         const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
         return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a[0].localeCompare(b[0]);
       })
-      .map(([k, list]) => [k, list.sort((a, b) => a.name.localeCompare(b.name))]);
-  }, [filtered, groupBy, rooms, bags]);
+      .map(([k, list]) => [k, [...list].sort(byNotOnTripThenName)]);
+  }, [filtered, groupBy, rooms, bags, onThisTrip, notThisTripSet]);
 
   const selectedKeys = Object.keys(sel).filter((k) => sel[k]);
   const selectedEntries = library.filter((e) => sel[e.key]);
 
-  const addSelected = () => {
-    onAddToTrip(selectedEntries.map((e) => ({
+  /* Adding now goes via a quantity step — six pairs of pants for nine days,
+     two for a weekend, and the moment you're choosing items is the moment
+     you actually know how long you're packing for. */
+  const [quantityStep, setQuantityStep] = useState(null); // array while confirming
+  const [quantities, setQuantities] = useState({});
+
+  const startAdd = () => {
+    setQuantityStep(selectedEntries);
+    setQuantities(Object.fromEntries(selectedEntries.map((e) => [e.key, e.quantity || 1])));
+  };
+
+  const [libDupeWarning, setLibDupeWarning] = useState("");
+  const confirmAdd = async () => {
+    const result = await onAddToTrip(quantityStep.map((e) => ({
       name: e.name, room_source: e.room_source, assigned_bag: e.assigned_bag,
-      quantity: e.quantity || 1, notes_or_special_instructions: e.notes_or_special_instructions || "",
+      quantity: quantities[e.key] || 1, notes_or_special_instructions: e.notes_or_special_instructions || "",
       is_prescription: !!e.is_prescription, last_minute: !!e.last_minute,
     })));
     setSel({});
-    onClose();
+    setQuantityStep(null);
+    if (result?.skipped?.length) {
+      setLibDupeWarning(`Already on this trip, so not added again: ${result.skipped.join(", ")}.`);
+    } else {
+      onClose();
+    }
   };
 
   return (
@@ -2958,14 +3054,16 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
                 {list.map((e) => {
                   const already = onThisTrip.has(e.key);
                   const isArchived = archivedSet.has(e.key);
+                  const excluded = notThisTripSet.has(e.key);
                   return (
-                    <li key={e.key} className={`flex items-stretch overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
+                    <li key={e.key} className={`flex items-stretch overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : excluded ? "border-slate-200 bg-slate-100" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
                       <button onClick={() => setSel({ ...sel, [e.key]: !sel[e.key] })}
-                        className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-slate-100 text-slate-300" : "bg-slate-50 text-slate-300"}`}>
+                        disabled={excluded}
+                        className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-slate-100 text-slate-300" : "bg-slate-50 text-slate-300"} disabled:opacity-40`}>
                         <Check size={16} strokeWidth={3} />
                       </button>
-                      <div className="min-w-0 flex-1 px-2 py-2">
-                        <p className={`text-sm font-semibold leading-tight ${already ? "text-slate-400" : ""}`}>
+                      <div className={`min-w-0 flex-1 px-2 py-2 ${excluded ? "opacity-50" : ""}`}>
+                        <p className={`text-sm font-semibold leading-tight ${already || excluded ? "text-slate-400" : ""} ${excluded ? "line-through" : ""}`}>
                           {e.name}
                           {e.is_prescription && <Pill size={11} className="ml-1 inline text-teal-700" />}
                           {e.last_minute && <Snowflake size={11} className="ml-1 inline text-sky-600" />}
@@ -2973,10 +3071,18 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
                         </p>
                         <p className="truncate text-xs text-slate-400">
                           {already && <span className="font-bold text-slate-500">On this trip · </span>}
+                          {excluded && <span className="font-bold text-slate-500">Not this trip · </span>}
                           {e.room_source || "Unsorted"} → {e.assigned_bag || "No bag"}
                           {e.tripIds.size > 1 && <span> · used on {e.tripIds.size} trips</span>}
                         </p>
                       </div>
+                      {!already && onToggleNotThisTrip && (
+                        <button onClick={() => onToggleNotThisTrip(e.key)}
+                          title={excluded ? "Bring back into consideration" : "Not coming on this trip"}
+                          className={`flex w-10 shrink-0 items-center justify-center ${excluded ? "text-teal-700" : "text-slate-300"}`}>
+                          {excluded ? <RotateCcw size={15} /> : <X size={15} />}
+                        </button>
+                      )}
                       <button onClick={() => setEditing({ ...e })} className="flex w-10 shrink-0 items-center justify-center text-slate-500">
                         <Pencil size={15} />
                       </button>
@@ -2996,11 +3102,40 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
         </>
       )}
 
+      {libDupeWarning && view === "library" && (
+        <p className="mb-3 rounded-xl border-2 border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">{libDupeWarning}</p>
+      )}
       {selectedKeys.length > 0 && view === "library" && (
-        <button onClick={addSelected} className={`${btn} sticky bottom-2 w-full bg-slate-900 py-4 text-white shadow-lg`}>
+        <button onClick={startAdd} className={`${btn} sticky bottom-2 w-full bg-slate-900 py-4 text-white shadow-lg`}>
           Add {selectedKeys.length} to this trip
         </button>
       )}
+
+      <Sheet open={!!quantityStep} title="How many of each?" onClose={() => setQuantityStep(null)}>
+        {quantityStep && (
+          <>
+            <p className="mb-4 text-sm text-slate-600">
+              {trip ? `${trip.days} days, ${trip.transport?.toLowerCase()}.` : ""} Set quantities for this trip — you can change any of them on the list later.
+            </p>
+            <ul className="mb-4 space-y-2">
+              {quantityStep.map((e) => (
+                <li key={e.key} className="rounded-xl border-2 border-slate-300 bg-white p-2">
+                  <p className="mb-1 text-sm font-semibold">{e.name}</p>
+                  <p className="mb-2 text-xs text-slate-400">{e.room_source} → {e.assigned_bag}</p>
+                  <QuantityInput value={quantities[e.key] || 1}
+                    onChange={(n) => setQuantities({ ...quantities, [e.key]: n })} />
+                </li>
+              ))}
+            </ul>
+            <button onClick={confirmAdd} className={`${btn} w-full bg-slate-900 py-4 text-white`}>
+              Add {quantityStep.length} item{quantityStep.length === 1 ? "" : "s"}
+            </button>
+            <button onClick={() => setQuantityStep(null)} className={`${btn} mt-3 w-full border-2 border-slate-300 bg-white`}>
+              Back
+            </button>
+          </>
+        )}
+      </Sheet>
 
       <Sheet open={!!editing} title="Edit item" onClose={() => { setEditing(null); setConfirmDelete(null); setApplyToPast(false); }}>
         {editing && (
