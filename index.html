@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b12";
+const BUILD = "b17";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -1174,6 +1174,12 @@ function App() {
   const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
   const addItems = async (rows, tripId = activeTripId) => {
+    /* Trim first — a stray leading space (easy to pick up from a paste or a
+       phone keyboard) is invisible on screen but sorts before every letter
+       and digit, which is what made a freshly-added item jump to the top
+       out of alphabetical order. */
+    rows = rows.map((r) => (r.name ? { ...r, name: r.name.trim() } : r));
+
     /* An item can appear on a trip only once by name — same rule the library
        and "did you mean" prompt already assume. Case and punctuation don't
        count as different: "Wipes" and "wipes" are the same item. */
@@ -1282,7 +1288,7 @@ function App() {
         label,
         [...list].sort((x, y) => {
           if (view !== "manifest" && !!x.is_packed !== !!y.is_packed) return x.is_packed ? 1 : -1;
-          return (x.name || "").localeCompare(y.name || "");
+          return (x.name || "").trim().localeCompare((y.name || "").trim());
         }),
       ]);
   }, [visible, view, rooms, bags]);
@@ -1373,7 +1379,12 @@ function App() {
                 <div className="relative flex-1">
                   <Search size={14} className="absolute left-2 top-2.5 text-slate-400" />
                   <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Find an item"
-                    className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-2 text-sm" />
+                    className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-8 text-sm" />
+                  {search && (
+                    <button onClick={() => setSearch("")} className="absolute right-2 top-2 text-slate-400" aria-label="Clear search">
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
                 <button onClick={() => setHidePacked(!hidePacked)}
                   className={`rounded-lg border-2 px-2 py-1.5 text-xs font-bold ${hidePacked ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-600"}`}>
@@ -1569,7 +1580,7 @@ function App() {
         rooms={rooms} bags={bags} packers={packers}
         onClose={() => setSheet(null)}
         onAddToTrip={(rows) => addItems(rows)}
-        onEditEverywhere={async (ids, patchFields) => {
+        onEditEverywhere={async (ids, patchFields, oldKey, newKey) => {
           const idSet = new Set(ids);
           setItems((p) => p.map((i) => (idSet.has(i.id) ? { ...i, ...patchFields } : i)));
           for (const id of ids) {
@@ -1580,6 +1591,22 @@ function App() {
             }
           }
           if (client) drainQueue();
+
+          /* Archived status and "not this trip" are keyed by the item's
+             normalised name, since that's the only stable-ish handle a
+             deduplicated library view has. Renaming changes that key, so
+             without this a rename would silently un-archive the item or
+             un-exclude it from a trip — carry the status across instead. */
+          if (oldKey && newKey && oldKey !== newKey) {
+            if (archivedLibraryItems.includes(oldKey)) {
+              await archiveLibraryItem(newKey);
+              await unarchiveLibraryItem(oldKey);
+            }
+            if (activeTrip?.not_this_trip?.includes(oldKey)) {
+              const next = activeTrip.not_this_trip.filter((k) => k !== oldKey).concat(newKey);
+              await patch("trips", activeTrip.id, { not_this_trip: next });
+            }
+          }
         }}
         onDeleteEverywhere={async (ids) => {
           const idSet = new Set(ids);
@@ -2271,7 +2298,7 @@ function EditItemSheet({ item, rooms, bags, packers, onAddRoom, onAddBag, onClos
       </p>
 
       <button onClick={() => onSave({
-        name: d.name, room_source: d.room_source, assigned_bag: d.assigned_bag, quantity: d.quantity,
+        name: d.name.trim(), room_source: d.room_source, assigned_bag: d.assigned_bag, quantity: d.quantity,
         notes_or_special_instructions: d.notes_or_special_instructions, packer: d.packer,
         is_flagged: d.is_flagged, flag_note: d.flag_note, is_prescription: d.is_prescription, last_minute: d.last_minute,
       })} className={`${btn} w-full bg-slate-900 py-4 text-white`}>Save changes</button>
@@ -2291,7 +2318,7 @@ function AddItemSheet({ open, rooms, bags, packers, items, onAddRoom, onAddBag, 
   const submit = async () => {
     if (!d.name.trim()) return;
     setDupeWarning("");
-    const result = await onAdd(d);
+    const result = await onAdd({ ...d, name: d.name.trim() });
     if (result?.skipped?.length) {
       setDupeWarning(`"${result.skipped[0]}" is already on this trip — not added again. Open it from the list if you need more of it.`);
       return; // let them see the message and decide, rather than closing under them
@@ -2818,13 +2845,14 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("all"); // all | added | notAdded
   const [applyToPast, setApplyToPast] = useState(false);
   const archivedSet = useMemo(() => new Set(archivedLibraryItems || []), [archivedLibraryItems]);
 
   useEffect(() => {
     if (open) {
       setSearch(initialSearch || "");
-      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); setLibDupeWarning("");
+      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); setLibDupeWarning(""); setStatusFilter("all"); setAddedConfirmation("");
       /* Only force groups open when arriving from a "did you mean X" link —
          otherwise leave the person's own collapsed/expanded choices alone. */
       if (initialSearch) {
@@ -2903,10 +2931,13 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
     const q = search.trim().toLowerCase();
     let list = library;
     if (!showArchived) list = list.filter((e) => !archivedSet.has(e.key));
+    if (statusFilter === "added") list = list.filter((e) => onThisTrip.has(e.key));
+    if (statusFilter === "notAdded") list = list.filter((e) => !onThisTrip.has(e.key));
     if (q) list = list.filter((e) => e.name.toLowerCase().includes(q));
     return list;
-  }, [library, search, archivedSet, showArchived]);
+  }, [library, search, archivedSet, showArchived, statusFilter, onThisTrip]);
   const archivedCount = library.filter((e) => archivedSet.has(e.key)).length;
+  const addedCount = library.filter((e) => onThisTrip.has(e.key)).length;
 
   /* Items already on this trip sink below the ones you could still add, and
      both halves run alphabetically — which also makes near-duplicates sit
@@ -2918,7 +2949,7 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
     const aDone = onThisTrip.has(a.key) || notThisTripSet.has(a.key);
     const bDone = onThisTrip.has(b.key) || notThisTripSet.has(b.key);
     if (aDone !== bDone) return aDone ? 1 : -1;
-    return (a.name || "").localeCompare(b.name || "");
+    return (a.name || "").trim().localeCompare((b.name || "").trim());
   };
 
   const grouped = useMemo(() => {
@@ -2951,23 +2982,32 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   const [quantities, setQuantities] = useState({});
 
   const startAdd = () => {
-    setQuantityStep(selectedEntries);
-    setQuantities(Object.fromEntries(selectedEntries.map((e) => [e.key, e.quantity || 1])));
+    /* Belt and braces: whatever put a tick there, an item marked "not this
+       trip" should never actually get added. */
+    const eligible = selectedEntries.filter((e) => !notThisTripSet.has(e.key));
+    setQuantityStep(eligible);
+    setQuantities(Object.fromEntries(eligible.map((e) => [e.key, e.quantity || 1])));
   };
 
   const [libDupeWarning, setLibDupeWarning] = useState("");
+  const [addedConfirmation, setAddedConfirmation] = useState("");
   const confirmAdd = async () => {
     const result = await onAddToTrip(quantityStep.map((e) => ({
       name: e.name, room_source: e.room_source, assigned_bag: e.assigned_bag,
       quantity: quantities[e.key] || 1, notes_or_special_instructions: e.notes_or_special_instructions || "",
       is_prescription: !!e.is_prescription, last_minute: !!e.last_minute,
     })));
+    const addedCount = quantityStep.length - (result?.skipped?.length || 0);
     setSel({});
     setQuantityStep(null);
     if (result?.skipped?.length) {
       setLibDupeWarning(`Already on this trip, so not added again: ${result.skipped.join(", ")}.`);
-    } else {
-      onClose();
+    } else if (addedCount) {
+      /* Stay open — adding in batches, a few at a time, is the normal way
+         this gets used, so closing after every add just means reopening it
+         over and over. */
+      setAddedConfirmation(`Added ${addedCount} item${addedCount === 1 ? "" : "s"}. Keep going, or close when you're done.`);
+      setTimeout(() => setAddedConfirmation(""), 4000);
     }
   };
 
@@ -3020,6 +3060,10 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
             Everything you've ever packed, listed once each. Tick to add to this trip, or tap the pencil to edit — edits apply to every trip that item appears on, which is how you empty out a room you want to delete.
           </p>
 
+          {addedConfirmation && (
+            <p className="mb-3 rounded-xl border-2 border-teal-300 bg-teal-50 p-3 text-sm font-semibold text-teal-800">{addedConfirmation}</p>
+          )}
+
           <div className="mb-2 flex gap-1">
             {[["room", "By room"], ["bag", "By bag"], ["name", "A–Z"]].map(([id, label]) => (
               <button key={id} onClick={() => setGroupBy(id)}
@@ -3029,10 +3073,28 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
             ))}
           </div>
 
+          <div className="mb-2 flex gap-1">
+            {[
+              ["all", "Everything"],
+              ["notAdded", `Not added yet`],
+              ["added", `Already on the list (${addedCount})`],
+            ].map(([id, label]) => (
+              <button key={id} onClick={() => setStatusFilter(id)}
+                className={`flex-1 rounded-lg border-2 px-1.5 py-1.5 text-xs font-bold ${statusFilter === id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-600"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
           <div className="relative mb-3">
             <Search size={14} className="absolute left-2 top-2.5 text-slate-400" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Find an item"
-              className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-2 text-sm" />
+              className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-8 text-sm" />
+            {search && (
+              <button onClick={() => setSearch("")} className="absolute right-2 top-2 text-slate-400" aria-label="Clear search">
+                <X size={16} />
+              </button>
+            )}
           </div>
 
           {archivedCount > 0 && (
@@ -3056,28 +3118,41 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
                   const isArchived = archivedSet.has(e.key);
                   const excluded = notThisTripSet.has(e.key);
                   return (
-                    <li key={e.key} className={`flex items-stretch overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : excluded ? "border-slate-200 bg-slate-100" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
+                    <li key={e.key} className={`flex items-stretch overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : already ? "border-teal-200 bg-teal-50" : excluded ? "border-slate-200 bg-slate-100" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
                       <button onClick={() => setSel({ ...sel, [e.key]: !sel[e.key] })}
                         disabled={excluded}
-                        className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-slate-100 text-slate-300" : "bg-slate-50 text-slate-300"} disabled:opacity-40`}>
+                        className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-teal-100 text-teal-600" : "bg-slate-50 text-slate-300"} disabled:opacity-40`}>
                         <Check size={16} strokeWidth={3} />
                       </button>
                       <div className={`min-w-0 flex-1 px-2 py-2 ${excluded ? "opacity-50" : ""}`}>
-                        <p className={`text-sm font-semibold leading-tight ${already || excluded ? "text-slate-400" : ""} ${excluded ? "line-through" : ""}`}>
+                        <p className={`text-sm font-semibold leading-tight ${excluded ? "text-slate-400 line-through" : ""}`}>
                           {e.name}
                           {e.is_prescription && <Pill size={11} className="ml-1 inline text-teal-700" />}
                           {e.last_minute && <Snowflake size={11} className="ml-1 inline text-sky-600" />}
                           {isArchived && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs font-bold text-slate-500">Archived</span>}
                         </p>
-                        <p className="truncate text-xs text-slate-400">
-                          {already && <span className="font-bold text-slate-500">On this trip · </span>}
-                          {excluded && <span className="font-bold text-slate-500">Not this trip · </span>}
-                          {e.room_source || "Unsorted"} → {e.assigned_bag || "No bag"}
-                          {e.tripIds.size > 1 && <span> · used on {e.tripIds.size} trips</span>}
-                        </p>
+                        {already ? (
+                          <p className="mt-0.5 flex items-center gap-1">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-teal-600 px-2 py-0.5 text-xs font-bold text-white">
+                              <Check size={11} strokeWidth={3} /> Already on the list
+                            </span>
+                          </p>
+                        ) : (
+                          <p className="truncate text-xs text-slate-400">
+                            {excluded && <span className="font-bold text-slate-500">Not this trip · </span>}
+                            {e.room_source || "Unsorted"} → {e.assigned_bag || "No bag"}
+                            {e.tripIds.size > 1 && <span> · used on {e.tripIds.size} trips</span>}
+                          </p>
+                        )}
                       </div>
                       {!already && onToggleNotThisTrip && (
-                        <button onClick={() => onToggleNotThisTrip(e.key)}
+                        <button onClick={() => {
+                            onToggleNotThisTrip(e.key);
+                            /* If it was ticked before being excluded, the tick
+                               would otherwise survive and still get added — 
+                               excluding something should always win. */
+                            if (!excluded && sel[e.key]) setSel({ ...sel, [e.key]: false });
+                          }}
                           title={excluded ? "Bring back into consideration" : "Not coming on this trip"}
                           className={`flex w-10 shrink-0 items-center justify-center ${excluded ? "text-teal-700" : "text-slate-300"}`}>
                           {excluded ? <RotateCcw size={15} /> : <X size={15} />}
@@ -3167,9 +3242,21 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
 
             <button
               onClick={() => {
-                const fields = { name: editing.name, room_source: editing.room_source, assigned_bag: editing.assigned_bag };
+                const fields = { name: editing.name.trim(), room_source: editing.room_source, assigned_bag: editing.assigned_bag };
                 const ids = applyToPast ? editing.occurrences.map((o) => o.id) : [editing.latestId];
-                onEditEverywhere(ids, fields);
+                const oldKey = editing.key;
+                const newKey = norm(fields.name);
+                onEditEverywhere(ids, fields, oldKey, newKey);
+                /* Selection is keyed by the same normalised name, so a rename
+                   needs the same migration locally or the tick just vanishes
+                   the moment the library re-derives its rows. */
+                if (oldKey !== newKey) {
+                  setSel((prev) => {
+                    if (!prev[oldKey]) return prev;
+                    const { [oldKey]: was, ...rest } = prev;
+                    return { ...rest, [newKey]: was };
+                  });
+                }
                 setEditing(null);
                 setApplyToPast(false);
               }}
@@ -3314,7 +3401,12 @@ function TripsSheet({ open, onClose, onNewTrip, trips, items, activeTripId, onSw
             <div className="relative">
               <Search size={14} className="absolute left-2 top-2.5 text-slate-400" />
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Find an item"
-                className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-2 text-sm" />
+                className="w-full rounded-lg border-2 border-slate-300 bg-white py-1.5 pl-7 pr-8 text-sm" />
+              {search && (
+                <button onClick={() => setSearch("")} className="absolute right-2 top-2 text-slate-400" aria-label="Clear search">
+                  <X size={16} />
+                </button>
+              )}
             </div>
           </div>
 
