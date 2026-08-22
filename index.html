@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b17";
+const BUILD = "b19";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -1295,7 +1295,7 @@ function App() {
 
   const jobCounts = JOB_KINDS.map((k) => {
     const l = tripTasks.filter((t) => t.kind === k.id);
-    return { ...k, done: l.filter((t) => t.done).length, total: l.length };
+    return { ...k, done: l.filter((t) => t.done === true || t.done === "true" || t.done === 1).length, total: l.length };
   });
 
   /* ------------------------------ render ---------------------------- */
@@ -1432,7 +1432,7 @@ function App() {
           <JobsScreen
             trip={activeTrip} tasks={tripTasks} packers={packers} counts={jobCounts}
             history={historyText(trips, items)}
-            onToggle={(t) => patch("tasks", t.id, { done: !t.done })}
+            onToggle={(t) => patch("tasks", t.id, { done: !(t.done === true || t.done === "true" || t.done === 1) })}
             onAdd={(kind, rows) => add("tasks", rows.map((r, n) => ({
               kind, done: false, packer: "Either of us",
               /* Position just needs to sort after everything already there.
@@ -1732,10 +1732,14 @@ function JobsScreen({ trip, tasks, packers, counts, history, onToggle, onAdd, on
 
   /* Done jobs sink to the bottom so the list stays about what's left to do,
      while keeping their relative order within each half. */
+  /* Guard against `done` arriving as a string — !!"false" is true, which
+     would make every task read as done and quietly defeat the sort. */
+  const isDone = (t) => t?.done === true || t?.done === "true" || t?.done === 1;
+
   const list = tasks
     .filter((t) => t.kind === kind)
     .sort((a, b) => {
-      if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+      if (isDone(a) !== isDone(b)) return isDone(a) ? 1 : -1;
       return (a.position || 0) - (b.position || 0);
     });
   const meta = JOB_KINDS.find((k) => k.id === kind);
@@ -1812,13 +1816,13 @@ function JobsScreen({ trip, tasks, packers, counts, history, onToggle, onAdd, on
                 <Check size={20} strokeWidth={3} />
               </button>
             ) : (
-              <button onClick={() => onToggle(t)} className={`flex w-12 shrink-0 items-center justify-center ${t.done ? "bg-teal-600 text-white" : "bg-slate-50 text-slate-300"}`}>
+              <button onClick={() => onToggle(t)} className={`flex w-12 shrink-0 items-center justify-center ${isDone(t) ? "bg-teal-600 text-white" : "bg-slate-50 text-slate-300"}`}>
                 <Check size={20} strokeWidth={3} />
               </button>
             )}
             <button onClick={() => (selectMode ? setSel({ ...sel, [t.id]: !sel[t.id] }) : setEditing(t))} className="flex flex-1 items-center gap-2 px-2 py-2 text-left">
               <div className="min-w-0 flex-1">
-                <p className={`text-sm font-semibold leading-tight ${!selectMode && t.done ? "text-slate-400 line-through" : ""}`}>{t.title}</p>
+                <p className={`text-sm font-semibold leading-tight ${!selectMode && isDone(t) ? "text-slate-400 line-through" : ""}`}>{t.title}</p>
                 {t.notes && <p className="truncate text-xs text-slate-500">{t.notes}</p>}
               </div>
               <PackerDot name={t.packer} />
@@ -2852,7 +2856,7 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   useEffect(() => {
     if (open) {
       setSearch(initialSearch || "");
-      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); setLibDupeWarning(""); setStatusFilter("all"); setAddedConfirmation("");
+      setSel({}); setEditing(null); setView("library"); setConfirmDelete(null); setLibDupeWarning(""); setStatusFilter("all"); setAddedConfirmation(""); setExpandedOnTrip({});
       /* Only force groups open when arriving from a "did you mean X" link —
          otherwise leave the person's own collapsed/expanded choices alone. */
       if (initialSearch) {
@@ -2913,6 +2917,12 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
     () => new Set(items.filter((i) => i.trip_id === activeTripId).map((i) => norm(i.name))),
     [items, activeTripId]
   );
+
+  /* Which "already on the list" rows are expanded to show what's actually
+     there — room, bag, quantity — without leaving the library. */
+  const [expandedOnTrip, setExpandedOnTrip] = useState({});
+  const tripItems = useMemo(() => items.filter((i) => i.trip_id === activeTripId), [items, activeTripId]);
+  const onThisTripKeyOf = (i) => norm(i.name);
 
   /* Items appearing more than once on the CURRENT trip — often deliberate
      (pants in the grab bag and the suitcase) so these are for review only. */
@@ -3117,50 +3127,75 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
                   const already = onThisTrip.has(e.key);
                   const isArchived = archivedSet.has(e.key);
                   const excluded = notThisTripSet.has(e.key);
+                  const isExpanded = expandedOnTrip[e.key];
+                  const onTripEntries = already ? tripItems.filter((i) => onThisTripKeyOf(i) === e.key) : [];
                   return (
-                    <li key={e.key} className={`flex items-stretch overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : already ? "border-teal-200 bg-teal-50" : excluded ? "border-slate-200 bg-slate-100" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
-                      <button onClick={() => setSel({ ...sel, [e.key]: !sel[e.key] })}
-                        disabled={excluded}
-                        className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-teal-100 text-teal-600" : "bg-slate-50 text-slate-300"} disabled:opacity-40`}>
-                        <Check size={16} strokeWidth={3} />
-                      </button>
-                      <div className={`min-w-0 flex-1 px-2 py-2 ${excluded ? "opacity-50" : ""}`}>
-                        <p className={`text-sm font-semibold leading-tight ${excluded ? "text-slate-400 line-through" : ""}`}>
-                          {e.name}
-                          {e.is_prescription && <Pill size={11} className="ml-1 inline text-teal-700" />}
-                          {e.last_minute && <Snowflake size={11} className="ml-1 inline text-sky-600" />}
-                          {isArchived && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs font-bold text-slate-500">Archived</span>}
-                        </p>
-                        {already ? (
-                          <p className="mt-0.5 flex items-center gap-1">
-                            <span className="inline-flex items-center gap-1 rounded-md bg-teal-600 px-2 py-0.5 text-xs font-bold text-white">
-                              <Check size={11} strokeWidth={3} /> Already on the list
-                            </span>
-                          </p>
-                        ) : (
-                          <p className="truncate text-xs text-slate-400">
-                            {excluded && <span className="font-bold text-slate-500">Not this trip · </span>}
-                            {e.room_source || "Unsorted"} → {e.assigned_bag || "No bag"}
-                            {e.tripIds.size > 1 && <span> · used on {e.tripIds.size} trips</span>}
-                          </p>
-                        )}
-                      </div>
-                      {!already && onToggleNotThisTrip && (
-                        <button onClick={() => {
-                            onToggleNotThisTrip(e.key);
-                            /* If it was ticked before being excluded, the tick
-                               would otherwise survive and still get added — 
-                               excluding something should always win. */
-                            if (!excluded && sel[e.key]) setSel({ ...sel, [e.key]: false });
-                          }}
-                          title={excluded ? "Bring back into consideration" : "Not coming on this trip"}
-                          className={`flex w-10 shrink-0 items-center justify-center ${excluded ? "text-teal-700" : "text-slate-300"}`}>
-                          {excluded ? <RotateCcw size={15} /> : <X size={15} />}
+                    <li key={e.key} className={`overflow-hidden rounded-lg border-2 ${sel[e.key] ? "border-teal-600" : already ? "border-slate-300 bg-slate-50" : excluded ? "border-slate-200 bg-slate-100" : isArchived ? "border-slate-200 bg-slate-50" : "border-slate-200"} bg-white`}>
+                      <div className="flex items-stretch">
+                        <button onClick={() => setSel({ ...sel, [e.key]: !sel[e.key] })}
+                          disabled={excluded}
+                          className={`flex w-10 shrink-0 items-center justify-center ${sel[e.key] ? "bg-teal-600 text-white" : already ? "bg-slate-200 text-slate-400" : "bg-slate-50 text-slate-300"} disabled:opacity-40`}>
+                          <Check size={16} strokeWidth={3} />
                         </button>
+                        <button
+                          onClick={() => already && setExpandedOnTrip({ ...expandedOnTrip, [e.key]: !isExpanded })}
+                          className={`min-w-0 flex-1 px-2 py-2 text-left ${excluded ? "opacity-50" : ""}`}
+                        >
+                          <p className={`text-sm font-semibold leading-tight ${already ? "text-slate-500" : ""} ${excluded ? "text-slate-400 line-through" : ""}`}>
+                            {e.name}
+                            {e.is_prescription && <Pill size={11} className="ml-1 inline text-teal-700" />}
+                            {e.last_minute && <Snowflake size={11} className="ml-1 inline text-sky-600" />}
+                            {isArchived && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs font-bold text-slate-500">Archived</span>}
+                          </p>
+                          {already ? (
+                            <p className="mt-0.5 flex items-center gap-1 text-xs font-bold text-slate-500">
+                              On the list already
+                              {onTripEntries.length > 1 && ` · ${onTripEntries.length} entries`}
+                              {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            </p>
+                          ) : (
+                            <p className="truncate text-xs text-slate-400">
+                              {excluded && <span className="font-bold text-slate-500">Not this trip · </span>}
+                              {e.room_source || "Unsorted"} → {e.assigned_bag || "No bag"}
+                              {e.tripIds.size > 1 && <span> · used on {e.tripIds.size} trips</span>}
+                            </p>
+                          )}
+                        </button>
+                        {!already && onToggleNotThisTrip && (
+                          <button onClick={() => {
+                              onToggleNotThisTrip(e.key);
+                              /* If it was ticked before being excluded, the tick
+                                 would otherwise survive and still get added — 
+                                 excluding something should always win. */
+                              if (!excluded && sel[e.key]) setSel({ ...sel, [e.key]: false });
+                            }}
+                            title={excluded ? "Bring back into consideration" : "Not coming on this trip"}
+                            className={`flex w-10 shrink-0 items-center justify-center ${excluded ? "text-teal-700" : "text-slate-300"}`}>
+                            {excluded ? <RotateCcw size={15} /> : <X size={15} />}
+                          </button>
+                        )}
+                        <button onClick={() => setEditing({ ...e })} className="flex w-10 shrink-0 items-center justify-center text-slate-500">
+                          <Pencil size={15} />
+                        </button>
+                      </div>
+
+                      {already && isExpanded && (
+                        <div className="border-t-2 border-slate-200 bg-white px-2 py-2">
+                          <p className="mb-1.5 text-xs font-bold uppercase tracking-wider text-slate-400">Currently on this trip</p>
+                          <ul className="space-y-1">
+                            {onTripEntries.map((i) => (
+                              <li key={i.id} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-2 py-1.5">
+                                <span className="min-w-0 flex-1 text-xs">
+                                  <span className="font-semibold">{i.assigned_bag || "No bag"}</span>
+                                  <span className="text-slate-400"> · from {i.room_source || "Unsorted"}</span>
+                                  {i.is_packed && <span className="ml-1 text-teal-700">· packed</span>}
+                                </span>
+                                <span className="shrink-0 rounded bg-slate-200 px-2 py-0.5 text-xs font-bold">×{i.quantity || 1}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
                       )}
-                      <button onClick={() => setEditing({ ...e })} className="flex w-10 shrink-0 items-center justify-center text-slate-500">
-                        <Pencil size={15} />
-                      </button>
                     </li>
                   );
                 })}
