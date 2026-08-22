@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b19";
+const BUILD = "b20";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -874,6 +874,9 @@ function App() {
   const [view, setView] = useState("gather");
   const [filterPacker, setFilterPacker] = useState("all");
   const [hidePacked, setHidePacked] = useState(false);
+  const [listSelectMode, setListSelectMode] = useState(false);
+  const [listSel, setListSel] = useState({});
+  const [moveTarget, setMoveTarget] = useState(null); // "bag" | "room" while choosing
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState({});
 
@@ -1422,6 +1425,9 @@ function App() {
                   onAssignGroup={() => setAssigning({ label, list })}
                   photo={view === "manifest" ? photos.find((p) => p.trip_id === activeTripId && p.bag === label) : null}
                   onPhoto={view === "manifest" ? () => setSheet({ kind: "photo", bag: label }) : null}
+                  selectMode={listSelectMode}
+                  sel={listSel}
+                  onToggleSel={(id, on) => setListSel((prev) => ({ ...prev, [id]: on }))}
                 />
               ))}
             </main>
@@ -1648,10 +1654,11 @@ const Empty = ({ title, body, action }) => (
 
 /* --------------------------- list rendering ------------------------- */
 
-function Group({ label, list, view, collapsed, toggle, onTick, onOpen, onAssignGroup, photo, onPhoto }) {
+function Group({ label, list, view, collapsed, toggle, onTick, onOpen, onAssignGroup, photo, onPhoto, selectMode, sel, onToggleSel }) {
   const done = list.filter((i) => i.is_packed).length;
   const pct = list.length ? (done / list.length) * 100 : 0;
   const full = done === list.length;
+  const allSelected = list.length > 0 && list.every((i) => sel?.[i.id]);
   return (
     <section>
       <div className="sticky top-32 z-20 mb-1 overflow-hidden rounded-lg border-2 border-slate-900 bg-white">
@@ -1664,14 +1671,23 @@ function Group({ label, list, view, collapsed, toggle, onTick, onOpen, onAssignG
             <span className="text-xs font-bold tabular-nums text-slate-600">{done}/{list.length}</span>
             {full && <Check size={13} strokeWidth={3} className="text-teal-700" />}
           </button>
-          {onPhoto && (
-            <button onClick={onPhoto} className="rounded-md border-2 border-slate-300 bg-white p-1.5 text-slate-600" aria-label="Photo of this bag">
-              {photo ? <img src={photo.data_url} alt="" className="h-4 w-4 rounded object-cover" /> : <Camera size={14} />}
+          {selectMode ? (
+            <button onClick={() => list.forEach((i) => onToggleSel(i.id, !allSelected))}
+              className="shrink-0 rounded-md border-2 border-slate-300 bg-white px-2 py-1 text-xs font-bold text-teal-700">
+              {allSelected ? "None" : "All"}
             </button>
+          ) : (
+            <>
+              {onPhoto && (
+                <button onClick={onPhoto} className="rounded-md border-2 border-slate-300 bg-white p-1.5 text-slate-600" aria-label="Photo of this bag">
+                  {photo ? <img src={photo.data_url} alt="" className="h-4 w-4 rounded object-cover" /> : <Camera size={14} />}
+                </button>
+              )}
+              <button onClick={onAssignGroup} className="rounded-md border-2 border-slate-300 bg-white p-1.5 text-slate-600" aria-label="Assign this group">
+                <UserRound size={14} />
+              </button>
+            </>
           )}
-          <button onClick={onAssignGroup} className="rounded-md border-2 border-slate-300 bg-white p-1.5 text-slate-600" aria-label="Assign this group">
-            <UserRound size={14} />
-          </button>
         </div>
       </div>
 
@@ -1679,12 +1695,19 @@ function Group({ label, list, view, collapsed, toggle, onTick, onOpen, onAssignG
         <ul className="divide-y-2 divide-slate-100 overflow-hidden rounded-lg border-2 border-slate-300 bg-white">
           {list.map((item) => (
             <li key={item.id} className={`flex items-stretch ${item.is_flagged ? "border-l-4 border-amber-500" : ""}`}>
-              <button onClick={() => onTick(item)}
-                className={`flex w-12 shrink-0 items-center justify-center ${item.is_packed ? "bg-teal-600 text-white" : "bg-slate-50 text-slate-300"}`}
-                aria-label={item.is_packed ? "Not packed" : "Packed"}>
-                <Check size={20} strokeWidth={3} />
-              </button>
-              <button onClick={() => onOpen(item)} className="flex flex-1 items-center gap-2 px-2 py-2 text-left">
+              {selectMode ? (
+                <button onClick={() => onToggleSel(item.id, !sel?.[item.id])}
+                  className={`flex w-12 shrink-0 items-center justify-center ${sel?.[item.id] ? "bg-teal-600 text-white" : "bg-slate-50 text-slate-300"}`}>
+                  <Check size={20} strokeWidth={3} />
+                </button>
+              ) : (
+                <button onClick={() => onTick(item)}
+                  className={`flex w-12 shrink-0 items-center justify-center ${item.is_packed ? "bg-teal-600 text-white" : "bg-slate-50 text-slate-300"}`}
+                  aria-label={item.is_packed ? "Not packed" : "Packed"}>
+                  <Check size={20} strokeWidth={3} />
+                </button>
+              )}
+              <button onClick={() => (selectMode ? onToggleSel(item.id, !sel?.[item.id]) : onOpen(item))} className="flex flex-1 items-center gap-2 px-2 py-2 text-left">
                 <div className="min-w-0 flex-1">
                   <p className={`text-sm font-semibold leading-tight ${item.is_packed ? "text-slate-400 line-through" : ""}`}>
                     {item.name}
@@ -3251,7 +3274,7 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
         {editing && (
           <>
             <p className="mb-4 rounded-lg border-2 border-slate-200 bg-slate-50 p-2 text-xs text-slate-600">
-              Packed on {editing.tripIds.size} trip{editing.tripIds.size === 1 ? "" : "s"}. By default this updates how it's packed from now on — past trips keep their own record of where things actually went.
+              Packed on {editing.tripIds.size} trip{editing.tripIds.size === 1 ? "" : "s"}. Renaming applies everywhere — it's the same thing on every trip. Changing the room or bag only affects future use, so past trips keep their record of where things actually went.
             </p>
             <Field label="Item"><input className={inputCls} value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
             <Field label="From which room">
@@ -3267,9 +3290,9 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
               <label className="mb-4 flex items-start gap-2 rounded-lg border-2 border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
                 <input type="checkbox" checked={applyToPast} onChange={(e) => setApplyToPast(e.target.checked)} className="mt-0.5 h-5 w-5 shrink-0" />
                 <span>
-                  Also correct past trips ({editing.occurrences.length} entries)
+                  Also change the room and bag on past trips ({editing.occurrences.length} entries)
                   <span className="mt-1 block text-xs font-normal">
-                    For fixing a genuine mistake — a typo, a wrong name. Leave off if you've simply changed where something goes now, so Iona still shows where it really was.
+                    Leave off if you've simply changed where it goes now — Iona should still show where it really was. Renaming always applies everywhere, since it's the same thing on every trip.
                   </span>
                 </span>
               </label>
@@ -3277,15 +3300,29 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
 
             <button
               onClick={() => {
-                const fields = { name: editing.name.trim(), room_source: editing.room_source, assigned_bag: editing.assigned_bag };
-                const ids = applyToPast ? editing.occurrences.map((o) => o.id) : [editing.latestId];
+                const newName = editing.name.trim();
                 const oldKey = editing.key;
-                const newKey = norm(fields.name);
-                onEditEverywhere(ids, fields, oldKey, newKey);
+                const newKey = norm(newName);
+                const nameChanged = newKey !== oldKey;
+                const allIds = editing.occurrences.map((o) => o.id);
+
+                /* A name is an identity, not a per-trip fact — the same object
+                   is called the same thing on every trip. So renaming always
+                   applies everywhere. Renaming only the latest occurrence is
+                   what used to split a merged item back into its parts.
+                   Room and bag genuinely do differ per trip, so those keep the
+                   opt-in behaviour. */
+                if (nameChanged) {
+                  onEditEverywhere(allIds, { name: newName }, oldKey, newKey);
+                }
+                const placeFields = { room_source: editing.room_source, assigned_bag: editing.assigned_bag };
+                const placeIds = applyToPast ? allIds : [editing.latestId];
+                onEditEverywhere(placeIds, placeFields, null, null);
+
                 /* Selection is keyed by the same normalised name, so a rename
                    needs the same migration locally or the tick just vanishes
                    the moment the library re-derives its rows. */
-                if (oldKey !== newKey) {
+                if (nameChanged) {
                   setSel((prev) => {
                     if (!prev[oldKey]) return prev;
                     const { [oldKey]: was, ...rest } = prev;
@@ -3296,7 +3333,7 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
                 setApplyToPast(false);
               }}
               className={`${btn} w-full bg-slate-900 py-4 text-white`}>
-              {applyToPast ? `Update all ${editing.occurrences.length} entries` : "Save"}
+              Save
             </button>
 
             {archivedSet.has(editing.key) ? (
