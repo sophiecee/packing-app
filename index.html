@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b23";
+const BUILD = "b25";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -591,7 +591,7 @@ const DRAFT_SECTIONS = [
   {
     id: "medical",
     label: "medication and medical kit",
-    brief: "All medication, feeding equipment, PEG/tube kit, dressings, syringes, and clinical supplies. Weight RECENCY above all — the children's needs change constantly, so the most recently logged trip is the best guide even if its season and transport are wrong. Scale doses and consumables to the trip length, plus a safety margin of spare days. Mark prescription medication with p:true.",
+    brief: "All medication, feeding equipment, PEG/tube kit, dressings, syringes, and clinical supplies. Weight RECENCY above all — the children's needs change constantly, so the most recently logged trip is the best guide even if its season and transport are wrong. Scale doses and consumables to the trip length, plus a safety margin of spare days. Mark anything that will need reordering afterwards — medication, specialist formula, feeds, nappies of a particular size — with p:true.",
     max: 18,
   },
   {
@@ -668,7 +668,7 @@ n = item name (short)
 r = source room, ONLY from: ${rooms.join(", ")}
 b = target bag, ONLY from: ${bags.join(", ")}
 q = quantity (number)
-p = true only if it is prescription medication
+p = true only if it will need reordering afterwards (medication, specialist formula, feeds, a particular nappy size — not general one-off buys)
 l = true only if it can't be packed until the morning (fridge, freezer, charging, in daily use)
 x = short note, only where it genuinely helps. Empty string otherwise.`;
 
@@ -1294,12 +1294,19 @@ function App() {
         return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a[0].localeCompare(b[0]);
       })
       /* Packed items sink to the bottom of their group, so what's left to
-         gather stays at the top. In the "In bags" view everything is packed,
-         so ordering there stays alphabetical. */
+         gather stays at the top. Within the unpacked ones, "last minute"
+         items (fridge, freezer, still in daily use) sink to the end too —
+         they're meant to be the very last thing done, so burying them among
+         everything that's ready to pack now was working against the point
+         of the flag. In the "In bags" view everything is packed, so ordering
+         there stays alphabetical. */
       .map(([label, list]) => [
         label,
         [...list].sort((x, y) => {
           if (view !== "manifest" && !!x.is_packed !== !!y.is_packed) return x.is_packed ? 1 : -1;
+          if (view !== "manifest" && !x.is_packed && !y.is_packed && !!x.last_minute !== !!y.last_minute) {
+            return x.last_minute ? 1 : -1;
+          }
           return (x.name || "").trim().localeCompare((y.name || "").trim());
         }),
       ]);
@@ -2030,8 +2037,8 @@ function InfoScreen({ trip, contacts, onAdd, onPatch, onDelete }) {
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-bold">{c.label}</p>
-                    {c.reference && <p className="text-xs text-slate-600">{c.reference}</p>}
-                    {c.notes && <p className="mt-1 text-xs text-slate-500">{c.notes}</p>}
+                    {c.reference && <p className="whitespace-pre-line text-xs text-slate-600">{c.reference}</p>}
+                    {c.notes && <p className="mt-1 whitespace-pre-line text-xs text-slate-500">{c.notes}</p>}
                   </div>
                   <button onClick={() => setEditing(c)} className="rounded-md border-2 border-slate-300 p-2 text-slate-500"><Pencil size={14} /></button>
                 </div>
@@ -2141,7 +2148,7 @@ function AfterScreen({ trip, items, tripTasks, onSaveReview, onPatchItem, onAddI
       {section === "rx" && (
         <>
           <p className="mb-3 text-xs text-slate-500">
-            Everything marked as prescription on this trip. Tick it once it's requested, so nothing runs out in the week after you get home.
+            Everything marked as needing reordering on this trip — nappies, feeds, meds, anything you'll run out of. Tick it once it's requested, so nothing runs out in the week after you get home.
           </p>
           <ul className="mb-3 divide-y-2 divide-slate-100 overflow-hidden rounded-lg border-2 border-slate-300 bg-white">
             {rx.map((i) => (
@@ -2154,7 +2161,7 @@ function AfterScreen({ trip, items, tripTasks, onSaveReview, onPatchItem, onAddI
                   <p className={`text-sm font-semibold ${i.reordered ? "text-slate-400 line-through" : ""}`}>
                     {i.name}{i.quantity > 1 && <span className="ml-1 text-xs text-slate-500">×{i.quantity}</span>}
                   </p>
-                  {i.notes_or_special_instructions && <p className="text-xs text-slate-500">{i.notes_or_special_instructions}</p>}
+                  {i.notes_or_special_instructions && <p className="whitespace-pre-line text-xs text-slate-500">{i.notes_or_special_instructions}</p>}
                 </div>
               </li>
             ))}
@@ -2379,7 +2386,7 @@ function EditItemSheet({ item, rooms, bags, packers, onAddRoom, onAddBag, onClos
 
       <div className="mb-3 flex gap-2">
         <Toggle on={d.is_flagged} onClick={() => setD({ ...d, is_flagged: !d.is_flagged })} Icon={Flag} label="Flag" tone="border-amber-500 bg-amber-100 text-amber-800" />
-        <Toggle on={d.is_prescription} onClick={() => setD({ ...d, is_prescription: !d.is_prescription })} Icon={Pill} label="Prescription" tone="border-teal-700 bg-teal-100 text-teal-800" />
+        <Toggle on={d.is_prescription} onClick={() => setD({ ...d, is_prescription: !d.is_prescription })} Icon={Pill} label="Needs reordering" tone="border-teal-700 bg-teal-100 text-teal-800" />
         <Toggle on={d.last_minute} onClick={() => setD({ ...d, last_minute: !d.last_minute })} Icon={Snowflake} label="Last minute" tone="border-sky-600 bg-sky-100 text-sky-800" />
       </div>
       {d.is_flagged && (
@@ -2388,7 +2395,7 @@ function EditItemSheet({ item, rooms, bags, packers, onAddRoom, onAddBag, onClos
         </Field>
       )}
       <p className="mb-4 text-xs text-slate-500">
-        Flag: something's wrong with this one and the other of you needs to know. Prescription: shows up in Reorder after the trip. Last minute: fridge, freezer, or still in use this morning.
+        Flag: something's wrong with this one and the other of you needs to know. Needs reordering: shows up on the Reorder list after the trip — nappies, smoothie, Diaoralyte, anything you'll run out of. Last minute: fridge, freezer, or still in use this morning.
       </p>
 
       <button onClick={() => onSave({
@@ -2492,7 +2499,7 @@ function AddItemSheet({ open, rooms, bags, packers, items, onAddRoom, onAddBag, 
         </button>
         <button onClick={() => setD({ ...d, is_prescription: !d.is_prescription })}
           className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border-2 px-2 py-3 text-xs font-bold ${d.is_prescription ? "border-teal-700 bg-teal-100 text-teal-800" : "border-slate-300 bg-white text-slate-500"}`}>
-          <Pill size={15} /> Prescription
+          <Pill size={15} /> Needs reordering
         </button>
         <button onClick={() => setD({ ...d, last_minute: !d.last_minute })}
           className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border-2 px-2 py-3 text-xs font-bold ${d.last_minute ? "border-sky-600 bg-sky-100 text-sky-800" : "border-slate-300 bg-white text-slate-500"}`}>
