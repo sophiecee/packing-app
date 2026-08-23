@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b25";
+const BUILD = "b26";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -3034,6 +3034,7 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
   const [sel, setSel] = useState({});
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmConsolidate, setConfirmConsolidate] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all"); // all | added | notAdded
   const [applyToPast, setApplyToPast] = useState(false);
@@ -3513,6 +3514,37 @@ function LibrarySheet({ open, onClose, items, trips, activeTripId, rooms, bags, 
             <p className="mt-1 text-xs text-slate-500">
               Archiving just stops it cluttering the library and future suggestions. Every trip it's already on — including this one — keeps it exactly as it is. Reversible any time.
             </p>
+
+            {editing.occurrences.length > 1 && (
+              <>
+                {confirmConsolidate !== editing.key ? (
+                  <button onClick={() => setConfirmConsolidate(editing.key)}
+                    className={`${btn} mt-4 w-full border-2 border-amber-400 bg-amber-50 text-amber-800`}>
+                    <Copy size={16} /> Tidy up — keep just one record
+                  </button>
+                ) : (
+                  <div className="mt-3 rounded-xl border-2 border-amber-400 bg-amber-50 p-3">
+                    <p className="mb-2 text-sm font-bold text-amber-900">Keep one, remove the other {editing.occurrences.length - 1}?</p>
+                    <p className="mb-2 text-xs text-amber-800">
+                      This is for items you renamed to match another and expected to merge properly. The extra database rows behind them are what makes a merged item unravel again the moment you rename it. Keeping one clears that for good — nothing to do with which trip it came from, since you don't need that link.
+                    </p>
+                    <div className="flex gap-2">
+                      <button onClick={() => {
+                          const keepId = editing.latestId;
+                          const removeIds = editing.occurrences.map((o) => o.id).filter((id) => id !== keepId);
+                          onDeleteEverywhere(removeIds);
+                          setEditing(null); setConfirmConsolidate(null);
+                        }}
+                        className={`${btn} flex-1 bg-amber-700 text-white`}>Yes, keep one</button>
+                      <button onClick={() => setConfirmConsolidate(null)} className={`${btn} flex-1 border-2 border-slate-300 bg-white`}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+                <p className="mt-1 text-xs text-slate-500">
+                  Only shows when there's more than one record behind this name — the sign of an old merge that never fully tidied up.
+                </p>
+              </>
+            )}
 
             {confirmDelete !== editing.key ? (
               <button onClick={() => setConfirmDelete(editing.key)} className={`${btn} mt-4 w-full border-2 border-red-200 bg-white text-red-700`}>
