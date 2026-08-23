@@ -116,7 +116,7 @@ const CloudOff = (p) => <LucideIcon name="CloudOff" {...p} />;
 /* Bumped whenever the file changes, and shown next to "Synced" in the header
    — so "is my phone actually running the new version?" is answerable at a
    glance instead of by guesswork. */
-const BUILD = "b22";
+const BUILD = "b23";
 
 const DEFAULT_ROOMS = [
   "Kitchen", "Fridge / Freezer", "Bathroom", "Medicine Cabinet",
@@ -1338,10 +1338,12 @@ function App() {
               <span className="flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-amber-800">
                 <CloudOff size={12} /> {pendingCount} waiting to sync
               </span>
-            )}            {flagged.length > 0 && (
-              <span className="ml-auto flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-amber-800">
+            )}
+            {flagged.length > 0 && (
+              <button onClick={() => setSheet("flagged")}
+                className="ml-auto flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-amber-800">
                 <Flag size={12} /> {flagged.length} flagged
-              </span>
+              </button>
             )}
           </div>
 
@@ -1574,6 +1576,12 @@ function App() {
           setListSel({});
           setListSelectMode(false);
         }} />
+
+      <FlaggedSheet open={sheet === "flagged"} items={flagged}
+        onClose={() => setSheet(null)}
+        onOpen={(i) => { setSheet(null); setEditing(i); }}
+        onTick={(i) => patch("items", i.id, { is_packed: !i.is_packed })}
+        onClearFlag={(i) => patch("items", i.id, { is_flagged: false, flag_note: "" })} />
 
       <AssignSheet group={assigning} packers={packers} onClose={() => setAssigning(null)}
         onPick={(p) => { bulkPacker(assigning.list, p); setAssigning(null); }} />
@@ -2553,6 +2561,45 @@ function MoveSheet({ open, target, count, options, onClose, onMove }) {
             Back
           </button>
         </>
+      )}
+    </Sheet>
+  );
+}
+
+/* Flags are mostly "couldn't find it" or "couldn't find all of it" — this is
+   the follow-up list for going and actually resolving them, rather than
+   scrolling every group hunting for the amber stripe. */
+function FlaggedSheet({ open, onClose, items, onOpen, onClearFlag, onTick }) {
+  return (
+    <Sheet open={open} title={`${items.length} flagged item${items.length === 1 ? "" : "s"}`} onClose={onClose}>
+      <p className="mb-4 text-sm text-slate-600">
+        Tap an item to edit it properly, tick it off once found, or clear the flag directly if it's sorted.
+      </p>
+      {items.length === 0 ? (
+        <Empty title="Nothing flagged." body="Flag an item from its edit screen when something's wrong — can't find it, only one left, that kind of thing." />
+      ) : (
+        <ul className="space-y-2">
+          {items.map((i) => (
+            <li key={i.id} className="overflow-hidden rounded-xl border-2 border-amber-400 bg-amber-50">
+              <div className="flex items-stretch">
+                <button onClick={() => onTick(i)}
+                  className={`flex w-12 shrink-0 items-center justify-center ${i.is_packed ? "bg-teal-600 text-white" : "bg-white text-slate-300"}`}>
+                  <Check size={20} strokeWidth={3} />
+                </button>
+                <button onClick={() => onOpen(i)} className="flex-1 px-2 py-2 text-left">
+                  <p className={`text-sm font-semibold ${i.is_packed ? "text-slate-400 line-through" : ""}`}>{i.name}</p>
+                  <p className="text-xs text-slate-500">{i.room_source || "Unsorted"} → {i.assigned_bag || "No bag"}</p>
+                  <p className="mt-1 flex items-center gap-1 text-xs font-semibold text-amber-800">
+                    <Flag size={11} /> {i.flag_note || "Flagged"}
+                  </p>
+                </button>
+              </div>
+              <button onClick={() => onClearFlag(i)} className="w-full border-t-2 border-amber-200 bg-white px-2 py-2 text-xs font-bold text-amber-700">
+                Found it — clear flag
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </Sheet>
   );
